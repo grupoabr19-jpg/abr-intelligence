@@ -22,7 +22,7 @@ from xlsx_stream import (
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
 APP_NAME = 'Grupo ABR Margin Processor'
 
-MIRROR_URL = os.environ.get('MIRROR_URL', '').strip()
+MIRROR_URL = os.environ.get('MIRROR_URL', 'https://yppxtnrpvxeqmdqzsrnj.supabase.co/functions/v1/ingestao-sheets').strip()
 MIRROR_TOKEN = os.environ.get('MIRROR_TOKEN', '').strip()
 MIRROR_TOKEN_LOCATION = os.environ.get('MIRROR_TOKEN_LOCATION', 'body').strip().lower()
 MIRROR_TOKEN_FIELD = os.environ.get('MIRROR_TOKEN_FIELD', 'token').strip() or 'token'
@@ -1149,7 +1149,12 @@ def replay_active_mirror(payload: MirrorReplayRequest, background_tasks: Backgro
     if not mirror_configured():
         raise HTTPException(
             503,
-            'Espelhamento nao configurado: verifique MIRROR_URL e MIRROR_TOKEN no Render.'
+            {
+                'message': 'Espelhamento nao configurado.',
+                'mirror_url_configured': bool(MIRROR_URL),
+                'mirror_token_configured': bool(MIRROR_TOKEN),
+                'required_env': ['MIRROR_TOKEN'],
+            }
         )
 
     job_id = str(uuid.uuid4())
@@ -1242,7 +1247,16 @@ def health():
         db = True
     except Exception:
         status = 'degraded'
-    return {'service': APP_NAME, 'status': status, 'database': db}
+    return {
+        'service': APP_NAME,
+        'status': status,
+        'database': db,
+        'mirror_url_configured': bool(MIRROR_URL),
+        'mirror_token_configured': bool(MIRROR_TOKEN),
+        'mirror_token_location': MIRROR_TOKEN_LOCATION,
+        'mirror_token_field': MIRROR_TOKEN_FIELD,
+        'mirror_batch_size': MIRROR_BATCH_SIZE,
+    }
 
 
 @app.post('/v1/process', status_code=202)
