@@ -1271,6 +1271,7 @@ def health():
         'database': db,
         'mirror_url_configured': bool(MIRROR_URL),
         'mirror_token_configured': bool(MIRROR_TOKEN),
+        'mirror_token_sha256': hashlib.sha256(MIRROR_TOKEN.encode('utf-8')).hexdigest() if MIRROR_TOKEN else None,
         'mirror_token_location': MIRROR_TOKEN_LOCATION,
         'mirror_token_field': MIRROR_TOKEN_FIELD,
         'mirror_batch_size': MIRROR_BATCH_SIZE,
