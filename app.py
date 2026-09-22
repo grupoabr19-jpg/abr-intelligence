@@ -533,10 +533,20 @@ def process_job(job_id: str, payload_dict: dict):
     except Exception as exc:
         err = f'{type(exc).__name__}: {exc}'
         try:
+            # Como a carga é confirmada em lotes, qualquer job que termine em
+            # ERROR tem seus registros parciais removidos antes de ser marcado.
+            with db_conn() as conn:
+                conn.execute('delete from core.realizado where import_id=%s', (payload.import_id,))
+                conn.execute('delete from core.meta where import_id=%s', (payload.import_id,))
+                conn.execute('delete from core.gestao_producao where import_id=%s', (payload.import_id,))
+                conn.execute('delete from ingest.raw_excel where import_id=%s', (payload.import_id,))
+                conn.execute('delete from ingest.field_dictionary where import_id=%s', (payload.import_id,))
+                conn.commit()
+
             upsert_import(payload, job_id, status='ERROR', message=err)
             with db_conn() as conn:
                 conn.execute(
-                    "update ingest.importacoes set status='ERROR', processor_message=%s, completed_at=now() where import_id=%s",
+                    "update ingest.importacoes set status='ERROR', is_active=false, processor_message=%s, completed_at=now() where import_id=%s",
                     (err, payload.import_id)
                 )
                 conn.commit()
