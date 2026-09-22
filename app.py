@@ -599,15 +599,22 @@ def _mirror_send_batch(payload: ProcessRequest | MirrorContext, dataset: str, he
         response_text = response.text[:4000]
 
         if response.status_code < 200 or response.status_code >= 300:
+            sb_error_code = response.headers.get('sb-error-code')
+            detail = f'HTTP {response.status_code}'
+            if sb_error_code:
+                detail += f' / {sb_error_code}'
+            if response_text:
+                detail += f' / {response_text[:500]}'
+
             _mirror_record(
                 payload.import_id, payload.source_type, dataset, batch_number,
                 batch_id, len(rows), 'ERROR', attempts=1,
                 http_status=response.status_code,
                 response_text=response_text,
-                error_message=f'HTTP {response.status_code}'
+                error_message=detail[:2000]
             )
             raise RuntimeError(
-                f'Espelhamento {dataset} lote {batch_number}: HTTP {response.status_code}'
+                f'Espelhamento {dataset} lote {batch_number}: {detail}'
             )
 
         try:
@@ -640,12 +647,20 @@ def _mirror_send_batch(payload: ProcessRequest | MirrorContext, dataset: str, he
         return {'status': 'SENT', 'http_status': response.status_code}
 
     except Exception as exc:
-        # Se já houve registro de erro acima, este upsert apenas garante a mensagem final.
-        _mirror_record(
-            payload.import_id, payload.source_type, dataset, batch_number,
-            batch_id, len(rows), 'ERROR', attempts=1,
-            error_message=str(exc)[:2000]
-        )
+        # Não sobrescreve detalhes HTTP já gravados (response_text/http_status).
+        with db_conn() as conn:
+            conn.execute(
+                """
+                update ingest.outbound_sync
+                set status='ERROR',
+                    attempts=greatest(attempts,1),
+                    error_message=coalesce(error_message,%s),
+                    updated_at=now()
+                where batch_id=%s
+                """,
+                (str(exc)[:2000], batch_id)
+            )
+            conn.commit()
         raise
 
 
