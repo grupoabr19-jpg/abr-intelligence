@@ -584,7 +584,10 @@ def _mirror_send_batch(payload: ProcessRequest | MirrorContext, dataset: str, he
 
     request_headers = {
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        # Contrato padrão do destino. Mantemos também o body quando configurado
+        # para retrocompatibilidade com versões anteriores da Edge Function.
+        'x-abr-token': MIRROR_TOKEN,
     }
 
     if MIRROR_TOKEN_LOCATION == 'header':
