@@ -39,7 +39,14 @@ class ProcessRequest(BaseModel):
 def db_conn():
     if not DATABASE_URL:
         raise RuntimeError('DATABASE_URL não configurada.')
-    return psycopg.connect(DATABASE_URL, connect_timeout=20)
+    # As cargas XLSX usam COPY de dezenas de milhares de linhas.
+    # O Supabase deste projeto usa statement_timeout=2min por padrão,
+    # portanto o processador abre suas próprias sessões com 15 minutos.
+    return psycopg.connect(
+        DATABASE_URL,
+        connect_timeout=20,
+        options='-c statement_timeout=900000 -c lock_timeout=30000'
+    )
 
 
 def utcnow():
