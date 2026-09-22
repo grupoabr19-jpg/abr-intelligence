@@ -22,6 +22,15 @@ from xlsx_stream import (
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
 APP_NAME = 'Grupo ABR Margin Processor'
 
+MIRROR_URL = os.environ.get('MIRROR_URL', '').strip()
+MIRROR_TOKEN = os.environ.get('MIRROR_TOKEN', '').strip()
+MIRROR_TOKEN_LOCATION = os.environ.get('MIRROR_TOKEN_LOCATION', 'body').strip().lower()
+MIRROR_TOKEN_FIELD = os.environ.get('MIRROR_TOKEN_FIELD', 'token').strip() or 'token'
+try:
+    MIRROR_BATCH_SIZE = max(100, min(2000, int(os.environ.get('MIRROR_BATCH_SIZE', '500'))))
+except ValueError:
+    MIRROR_BATCH_SIZE = 500
+
 app = FastAPI(title=APP_NAME, version='1.0.0')
 
 
@@ -492,6 +501,228 @@ def activate_import(payload: ProcessRequest, sha256: str, row_counts: dict):
             )
 
 
+
+def mirror_configured():
+    return bool(MIRROR_URL and MIRROR_TOKEN)
+
+
+def _mirror_record(import_id: str, source_type: str, dataset: str, batch_number: int,
+                   batch_id: str, row_count: int, status: str, *,
+                   attempts: int = 0, http_status: int | None = None,
+                   response_text: str | None = None, error_message: str | None = None,
+                   sent: bool = False):
+    with db_conn() as conn:
+        conn.execute(
+            """
+            insert into ingest.outbound_sync (
+              import_id, source_type, dataset, batch_number, batch_id, row_count,
+              status, attempts, http_status, response_text, error_message, sent_at
+            ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                      case when %s then now() else null end)
+            on conflict (batch_id) do update set
+              status=excluded.status,
+              attempts=excluded.attempts,
+              http_status=excluded.http_status,
+              response_text=excluded.response_text,
+              error_message=excluded.error_message,
+              sent_at=case when excluded.status='SENT' then now() else ingest.outbound_sync.sent_at end,
+              updated_at=now()
+            """,
+            (
+                import_id, source_type, dataset, batch_number, batch_id, row_count,
+                status, attempts, http_status, response_text, error_message, sent
+            )
+        )
+        conn.commit()
+
+
+def _mirror_send_batch(payload: ProcessRequest, dataset: str, headers: list[str],
+                       rows: list[list[object]], batch_number: int,
+                       start_row: int, is_last_batch: bool):
+    if not mirror_configured():
+        return {'status': 'SKIPPED', 'reason': 'MIRROR_URL/MIRROR_TOKEN não configurados'}
+
+    batch_id = f'{payload.import_id}:{dataset}:{batch_number}'
+    _mirror_record(
+        payload.import_id, payload.source_type, dataset, batch_number,
+        batch_id, len(rows), 'SENDING', attempts=1
+    )
+
+    body = {
+        'sheetName': dataset,
+        'headers': headers,
+        'rows': rows,
+        'importId': payload.import_id,
+        'sourceType': payload.source_type,
+        'batchNumber': batch_number,
+        'startRow': start_row,
+        'isLastBatch': is_last_batch,
+        'mode': 'append'
+    }
+
+    request_headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    }
+
+    if MIRROR_TOKEN_LOCATION == 'header':
+        request_headers[MIRROR_TOKEN_FIELD] = MIRROR_TOKEN
+    else:
+        body[MIRROR_TOKEN_FIELD] = MIRROR_TOKEN
+
+    try:
+        with httpx.Client(timeout=90.0, follow_redirects=True) as client:
+            response = client.post(MIRROR_URL, json=body, headers=request_headers)
+
+        response_text = response.text[:4000]
+
+        if response.status_code < 200 or response.status_code >= 300:
+            _mirror_record(
+                payload.import_id, payload.source_type, dataset, batch_number,
+                batch_id, len(rows), 'ERROR', attempts=1,
+                http_status=response.status_code,
+                response_text=response_text,
+                error_message=f'HTTP {response.status_code}'
+            )
+            raise RuntimeError(
+                f'Espelhamento {dataset} lote {batch_number}: HTTP {response.status_code}'
+            )
+
+        try:
+            result = response.json()
+        except Exception:
+            result = {}
+
+        if isinstance(result, dict) and (
+            result.get('error') or str(result.get('status', '')).lower() == 'error'
+        ):
+            message = str(result.get('error') or result.get('message') or 'Destino recusou o lote')
+            _mirror_record(
+                payload.import_id, payload.source_type, dataset, batch_number,
+                batch_id, len(rows), 'ERROR', attempts=1,
+                http_status=response.status_code,
+                response_text=response_text,
+                error_message=message
+            )
+            raise RuntimeError(
+                f'Espelhamento {dataset} lote {batch_number}: {message}'
+            )
+
+        _mirror_record(
+            payload.import_id, payload.source_type, dataset, batch_number,
+            batch_id, len(rows), 'SENT', attempts=1,
+            http_status=response.status_code,
+            response_text=response_text,
+            sent=True
+        )
+        return {'status': 'SENT', 'http_status': response.status_code}
+
+    except Exception as exc:
+        # Se já houve registro de erro acima, este upsert apenas garante a mensagem final.
+        _mirror_record(
+            payload.import_id, payload.source_type, dataset, batch_number,
+            batch_id, len(rows), 'ERROR', attempts=1,
+            error_message=str(exc)[:2000]
+        )
+        raise
+
+
+def _sheet_mirror_spec(source_type: str):
+    if source_type == 'MARGEM':
+        return [
+            ('BD', 2, 3, 'Realizado'),
+            ('BD_Meta', 1, 2, 'Meta'),
+            ('TD_Meta', 1, 2, None),
+            ('Apoio', 1, 2, None),
+            ('Tabela de Preço', 2, 3, None),
+        ]
+    return [
+        ('Gestao da ProdV6', 1, 2, 'Tabela_Gestao_da_ProdV6'),
+    ]
+
+
+def mirror_xlsx_to_secondary(path: Path, payload: ProcessRequest, job_id: str):
+    if not mirror_configured():
+        return {
+            'configured': False,
+            'status': 'SKIPPED',
+            'message': 'MIRROR_URL/MIRROR_TOKEN não configurados'
+        }
+
+    sent_batches = 0
+    sent_rows = 0
+
+    with XlsxStream(path) as xlsx:
+        available = set(xlsx.sheet_names())
+
+        for dataset, header_row, first_data_row, table_name in _sheet_mirror_spec(payload.source_type):
+            if dataset not in available:
+                continue
+
+            headers_map = xlsx.header_map(dataset, header_row)
+            if not headers_map:
+                continue
+
+            max_col = max(headers_map)
+            headers = [
+                str(headers_map.get(i) or f'COL_{i}')
+                for i in range(1, max_col + 1)
+            ]
+
+            last_row = None
+            if table_name:
+                bounds = xlsx.table_row_bounds(table_name)
+                if bounds:
+                    last_row = bounds[1]
+
+            batch: list[list[object]] = []
+            batch_number = 1
+            batch_start_row = first_data_row
+
+            for row_num, values, formulas in xlsx.iter_rows(dataset):
+                if row_num < first_data_row:
+                    continue
+                if last_row is not None and row_num > last_row:
+                    break
+                if not values:
+                    continue
+
+                row = [values.get(i) for i in range(1, max_col + 1)]
+                batch.append(row)
+
+                if len(batch) >= MIRROR_BATCH_SIZE:
+                    _mirror_send_batch(
+                        payload, dataset, headers, batch,
+                        batch_number, batch_start_row, False
+                    )
+                    sent_batches += 1
+                    sent_rows += len(batch)
+                    batch_number += 1
+                    batch_start_row = row_num + 1
+                    batch = []
+
+                    update_job(
+                        job_id,
+                        progress=99,
+                        message=f'Espelhando {dataset}: {sent_rows:,} linhas enviadas'.replace(',', '.')
+                    )
+
+            if batch:
+                _mirror_send_batch(
+                    payload, dataset, headers, batch,
+                    batch_number, batch_start_row, True
+                )
+                sent_batches += 1
+                sent_rows += len(batch)
+
+    return {
+        'configured': True,
+        'status': 'SENT',
+        'batches': sent_batches,
+        'rows': sent_rows
+    }
+
+
 def process_job(job_id: str, payload_dict: dict):
     payload = ProcessRequest(**payload_dict)
     tmp_path = Path(tempfile.gettempdir()) / f'abr_{job_id}.xlsx'
@@ -528,8 +759,30 @@ def process_job(job_id: str, payload_dict: dict):
             raise RuntimeError('Nenhuma linha válida foi processada.')
 
         activate_import(payload, sha256, row_counts)
-        update_job(job_id, status='READY', progress=100, message='Base atualizada e ativa.',
-                   rows_processed=sum(row_counts.values()), finished=True)
+
+        mirror_message = 'Espelhamento secundário não configurado.'
+        try:
+            mirror_result = mirror_xlsx_to_secondary(tmp_path, payload, job_id)
+            if mirror_result.get('status') == 'SENT':
+                mirror_message = (
+                    f" Espelhamento concluído: {mirror_result.get('rows', 0):,} linhas "
+                    f"em {mirror_result.get('batches', 0)} lotes."
+                ).replace(',', '.')
+            else:
+                mirror_message = ' Espelhamento secundário ignorado.'
+        except Exception as mirror_exc:
+            # A carga principal já está validada e ativa. Falha no destino secundário
+            # não desfaz o Supabase principal; fica registrada em ingest.outbound_sync.
+            mirror_message = f' Espelhamento secundário com erro: {mirror_exc}'
+
+        update_job(
+            job_id,
+            status='READY',
+            progress=100,
+            message='Base atualizada e ativa.' + mirror_message,
+            rows_processed=sum(row_counts.values()),
+            finished=True
+        )
     except Exception as exc:
         err = f'{type(exc).__name__}: {exc}'
         try:
