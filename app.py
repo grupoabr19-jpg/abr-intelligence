@@ -227,41 +227,57 @@ def process_margin(path: Path, payload: ProcessRequest, job_id: str):
         realized_sql = 'copy core.realizado (' + ','.join(realized_cols) + ') from stdin'
 
         count_real = 0
+        realized_batch = []
         with db_conn() as conn:
-            with conn.cursor() as cur, cur.copy(realized_sql) as cp:
-                for row_num, v, formulas in xlsx.iter_rows('BD'):
-                    if row_num < 3:
-                        continue
-                    if bd_last_row is not None and row_num > bd_last_row:
-                        break
-                    if not v:
-                        continue
-                    raw = raw_from_row(v, bd_headers)
-                    cp.write_row((
-                        payload.import_id, row_num,
-                        company_key_from_margin(v.get(20)),
-                        normalize_invoice(v.get(9)),
-                        normalize_key(v.get(6)),
-                        normalize_key(v.get(12)),
-                        excel_date(v.get(3)),
-                        None if v.get(20) is None else str(v.get(20)),
-                        None if v.get(9) is None else str(v.get(9)),
-                        None if v.get(6) is None else str(v.get(6)),
-                        None if v.get(7) is None else str(v.get(7)),
-                        None if v.get(11) is None else str(v.get(11)),
-                        None if v.get(12) is None else str(v.get(12)),
-                        None if v.get(19) is None else str(v.get(19)),
-                        None if v.get(18) is None else str(v.get(18)),
-                        None if v.get(88) is None else str(v.get(88)),
-                        numeric(v.get(25)), numeric(v.get(26)), numeric(v.get(34)),
-                        numeric(v.get(35)), numeric(v.get(46)), numeric(v.get(47)),
-                        Jsonb(raw)
-                    ))
-                    count_real += 1
-                    if count_real % 5000 == 0:
-                        update_job(job_id, progress=min(55, 20 + count_real / 1800), rows_processed=count_real,
-                                   message=f'BD: {count_real:,} linhas processadas'.replace(',', '.'))
-            conn.commit()
+            for row_num, v, formulas in xlsx.iter_rows('BD'):
+                if row_num < 3:
+                    continue
+                if bd_last_row is not None and row_num > bd_last_row:
+                    break
+                if not v:
+                    continue
+                raw = raw_from_row(v, bd_headers)
+                realized_batch.append((
+                    payload.import_id, row_num,
+                    company_key_from_margin(v.get(20)),
+                    normalize_invoice(v.get(9)),
+                    normalize_key(v.get(6)),
+                    normalize_key(v.get(12)),
+                    excel_date(v.get(3)),
+                    None if v.get(20) is None else str(v.get(20)),
+                    None if v.get(9) is None else str(v.get(9)),
+                    None if v.get(6) is None else str(v.get(6)),
+                    None if v.get(7) is None else str(v.get(7)),
+                    None if v.get(11) is None else str(v.get(11)),
+                    None if v.get(12) is None else str(v.get(12)),
+                    None if v.get(19) is None else str(v.get(19)),
+                    None if v.get(18) is None else str(v.get(18)),
+                    None if v.get(88) is None else str(v.get(88)),
+                    numeric(v.get(25)), numeric(v.get(26)), numeric(v.get(34)),
+                    numeric(v.get(35)), numeric(v.get(46)), numeric(v.get(47)),
+                    Jsonb(raw)
+                ))
+                count_real += 1
+
+                if len(realized_batch) >= 4000:
+                    with conn.cursor() as cur, cur.copy(realized_sql) as cp:
+                        for item in realized_batch:
+                            cp.write_row(item)
+                    conn.commit()
+                    realized_batch.clear()
+                    update_job(
+                        job_id,
+                        progress=min(55, 20 + count_real / 1800),
+                        rows_processed=count_real,
+                        message=f'BD: {count_real:,} linhas processadas'.replace(',', '.')
+                    )
+
+            if realized_batch:
+                with conn.cursor() as cur, cur.copy(realized_sql) as cp:
+                    for item in realized_batch:
+                        cp.write_row(item)
+                conn.commit()
+                realized_batch.clear()
 
         meta_cols = (
             'import_id','source_row','ano_mes','unidade','mercado','deposito','codigo_produto',
@@ -274,47 +290,62 @@ def process_margin(path: Path, payload: ProcessRequest, job_id: str):
         )
         meta_sql = 'copy core.meta (' + ','.join(meta_cols) + ') from stdin'
         count_meta = 0
+        meta_batch = []
         with db_conn() as conn:
-            with conn.cursor() as cur, cur.copy(meta_sql) as cp:
-                for row_num, v, formulas in xlsx.iter_rows('BD_Meta'):
-                    if row_num < 2:
-                        continue
-                    if meta_last_row is not None and row_num > meta_last_row:
-                        break
-                    if not v:
-                        continue
-                    raw = raw_from_row(v, meta_headers)
-                    cp.write_row((
-                        payload.import_id, row_num,
-                        str(v.get(1)) if v.get(1) is not None else None,
-                        str(v.get(2)) if v.get(2) is not None else None,
-                        str(v.get(3)) if v.get(3) is not None else None,
-                        str(v.get(4)) if v.get(4) is not None else None,
-                        str(v.get(5)) if v.get(5) is not None else None,
-                        str(v.get(6)) if v.get(6) is not None else None,
-                        str(v.get(7)) if v.get(7) is not None else None,
-                        numeric(v.get(8)),
-                        str(v.get(9)) if v.get(9) is not None else None,
-                        str(v.get(10)) if v.get(10) is not None else None,
-                        str(v.get(11)) if v.get(11) is not None else None,
-                        str(v.get(12)) if v.get(12) is not None else None,
-                        str(v.get(13)) if v.get(13) is not None else None,
-                        str(v.get(14)) if v.get(14) is not None else None,
-                        str(v.get(15)) if v.get(15) is not None else None,
-                        numeric(v.get(16)), numeric(v.get(17)), numeric(v.get(18)), numeric(v.get(19)),
-                        numeric(v.get(20)), numeric(v.get(21)), numeric(v.get(22)), numeric(v.get(23)),
-                        numeric(v.get(24)), numeric(v.get(29)), numeric(v.get(30)), numeric(v.get(31)),
-                        numeric(v.get(32)), numeric(v.get(33)), numeric(v.get(34)), numeric(v.get(35)),
-                        numeric(v.get(36)), numeric(v.get(37)), numeric(v.get(38)), numeric(v.get(39)),
-                        numeric(v.get(40)), numeric(v.get(41)), numeric(v.get(42)), numeric(v.get(43)),
-                        numeric(v.get(44)), numeric(v.get(45)), Jsonb(raw)
-                    ))
-                    count_meta += 1
-                    if count_meta % 7000 == 0:
-                        update_job(job_id, progress=min(82, 58 + count_meta / 2300),
-                                   rows_processed=count_real + count_meta,
-                                   message=f'BD_Meta: {count_meta:,} linhas processadas'.replace(',', '.'))
-            conn.commit()
+            for row_num, v, formulas in xlsx.iter_rows('BD_Meta'):
+                if row_num < 2:
+                    continue
+                if meta_last_row is not None and row_num > meta_last_row:
+                    break
+                if not v:
+                    continue
+                raw = raw_from_row(v, meta_headers)
+                meta_batch.append((
+                    payload.import_id, row_num,
+                    str(v.get(1)) if v.get(1) is not None else None,
+                    str(v.get(2)) if v.get(2) is not None else None,
+                    str(v.get(3)) if v.get(3) is not None else None,
+                    str(v.get(4)) if v.get(4) is not None else None,
+                    str(v.get(5)) if v.get(5) is not None else None,
+                    str(v.get(6)) if v.get(6) is not None else None,
+                    str(v.get(7)) if v.get(7) is not None else None,
+                    numeric(v.get(8)),
+                    str(v.get(9)) if v.get(9) is not None else None,
+                    str(v.get(10)) if v.get(10) is not None else None,
+                    str(v.get(11)) if v.get(11) is not None else None,
+                    str(v.get(12)) if v.get(12) is not None else None,
+                    str(v.get(13)) if v.get(13) is not None else None,
+                    str(v.get(14)) if v.get(14) is not None else None,
+                    str(v.get(15)) if v.get(15) is not None else None,
+                    numeric(v.get(16)), numeric(v.get(17)), numeric(v.get(18)), numeric(v.get(19)),
+                    numeric(v.get(20)), numeric(v.get(21)), numeric(v.get(22)), numeric(v.get(23)),
+                    numeric(v.get(24)), numeric(v.get(29)), numeric(v.get(30)), numeric(v.get(31)),
+                    numeric(v.get(32)), numeric(v.get(33)), numeric(v.get(34)), numeric(v.get(35)),
+                    numeric(v.get(36)), numeric(v.get(37)), numeric(v.get(38)), numeric(v.get(39)),
+                    numeric(v.get(40)), numeric(v.get(41)), numeric(v.get(42)), numeric(v.get(43)),
+                    numeric(v.get(44)), numeric(v.get(45)), Jsonb(raw)
+                ))
+                count_meta += 1
+
+                if len(meta_batch) >= 4000:
+                    with conn.cursor() as cur, cur.copy(meta_sql) as cp:
+                        for item in meta_batch:
+                            cp.write_row(item)
+                    conn.commit()
+                    meta_batch.clear()
+                    update_job(
+                        job_id,
+                        progress=min(82, 58 + count_meta / 2300),
+                        rows_processed=count_real + count_meta,
+                        message=f'BD_Meta: {count_meta:,} linhas processadas'.replace(',', '.')
+                    )
+
+            if meta_batch:
+                with conn.cursor() as cur, cur.copy(meta_sql) as cp:
+                    for item in meta_batch:
+                        cp.write_row(item)
+                conn.commit()
+                meta_batch.clear()
 
         aux_counts = {}
         for sheet in ('TD_Meta', 'Apoio', 'Tabela de Preço'):
@@ -368,59 +399,76 @@ def process_production(path: Path, payload: ProcessRequest, job_id: str):
         )
         copy_sql = 'copy core.gestao_producao (' + ','.join(cols) + ') from stdin'
         count = 0
+        prod_batch = []
         with db_conn() as conn:
-            with conn.cursor() as cur, cur.copy(copy_sql) as cp:
-                for row_num, v, formulas in xlsx.iter_rows(sheet):
-                    if row_num < 2:
-                        continue
-                    if prod_last_row is not None and row_num > prod_last_row:
-                        break
-                    if not v:
-                        continue
-                    raw = raw_from_row(v, headers)
-                    cp.write_row((
-                        payload.import_id, row_num,
-                        company_key_from_production(v.get(9)), normalize_invoice(v.get(52)),
-                        normalize_key(v.get(14)), normalize_key(v.get(10)),
-                        excel_date(v.get(1)), excel_date(v.get(2)), str(v.get(3)) if v.get(3) is not None else None,
-                        excel_date(v.get(4)), str(v.get(6)) if v.get(6) is not None else None,
-                        str(v.get(7)) if v.get(7) is not None else None,
-                        str(v.get(8)) if v.get(8) is not None else None,
-                        str(v.get(9)) if v.get(9) is not None else None,
-                        str(v.get(10)) if v.get(10) is not None else None,
-                        str(v.get(11)) if v.get(11) is not None else None,
-                        str(v.get(12)) if v.get(12) is not None else None,
-                        str(v.get(13)) if v.get(13) is not None else None,
-                        str(v.get(14)) if v.get(14) is not None else None,
-                        str(v.get(15)) if v.get(15) is not None else None,
-                        str(v.get(16)) if v.get(16) is not None else None,
-                        str(v.get(17)) if v.get(17) is not None else None,
-                        numeric(v.get(18)), numeric(v.get(19)), numeric(v.get(20)), numeric(v.get(21)), numeric(v.get(22)),
-                        str(v.get(23)) if v.get(23) is not None else None,
-                        str(v.get(24)) if v.get(24) is not None else None,
-                        excel_date(v.get(25)), str(v.get(26)) if v.get(26) is not None else None,
-                        str(v.get(27)) if v.get(27) is not None else None,
-                        numeric(v.get(28)), str(v.get(29)) if v.get(29) is not None else None,
-                        numeric(v.get(30)), numeric(v.get(31)), numeric(v.get(32)), excel_date(v.get(33)),
-                        str(v.get(34)) if v.get(34) is not None else None,
-                        str(v.get(35)) if v.get(35) is not None else None,
-                        numeric(v.get(36)), excel_date(v.get(37)), str(v.get(38)) if v.get(38) is not None else None,
-                        excel_date(v.get(39)), excel_date(v.get(40)), str(v.get(41)) if v.get(41) is not None else None,
-                        numeric(v.get(42)), numeric(v.get(43)), str(v.get(44)) if v.get(44) is not None else None,
-                        excel_date(v.get(45)), str(v.get(46)) if v.get(46) is not None else None,
-                        str(v.get(47)) if v.get(47) is not None else None,
-                        excel_date(v.get(48)), str(v.get(49)) if v.get(49) is not None else None,
-                        str(v.get(50)) if v.get(50) is not None else None,
-                        excel_date(v.get(51)), str(v.get(52)) if v.get(52) is not None else None,
-                        numeric(v.get(53)), numeric(v.get(54)), str(v.get(55)) if v.get(55) is not None else None,
-                        excel_date(v.get(56)), excel_date(v.get(57)), str(v.get(58)) if v.get(58) is not None else None,
-                        numeric(v.get(59)), Jsonb(raw)
-                    ))
-                    count += 1
-                    if count % 5000 == 0:
-                        update_job(job_id, progress=min(88, 22 + count / 700), rows_processed=count,
-                                   message=f'Gestão da Produção: {count:,} linhas processadas'.replace(',', '.'))
-            conn.commit()
+            for row_num, v, formulas in xlsx.iter_rows(sheet):
+                if row_num < 2:
+                    continue
+                if prod_last_row is not None and row_num > prod_last_row:
+                    break
+                if not v:
+                    continue
+                raw = raw_from_row(v, headers)
+                prod_batch.append((
+                    payload.import_id, row_num,
+                    company_key_from_production(v.get(9)), normalize_invoice(v.get(52)),
+                    normalize_key(v.get(14)), normalize_key(v.get(10)),
+                    excel_date(v.get(1)), excel_date(v.get(2)), str(v.get(3)) if v.get(3) is not None else None,
+                    excel_date(v.get(4)), str(v.get(6)) if v.get(6) is not None else None,
+                    str(v.get(7)) if v.get(7) is not None else None,
+                    str(v.get(8)) if v.get(8) is not None else None,
+                    str(v.get(9)) if v.get(9) is not None else None,
+                    str(v.get(10)) if v.get(10) is not None else None,
+                    str(v.get(11)) if v.get(11) is not None else None,
+                    str(v.get(12)) if v.get(12) is not None else None,
+                    str(v.get(13)) if v.get(13) is not None else None,
+                    str(v.get(14)) if v.get(14) is not None else None,
+                    str(v.get(15)) if v.get(15) is not None else None,
+                    str(v.get(16)) if v.get(16) is not None else None,
+                    str(v.get(17)) if v.get(17) is not None else None,
+                    numeric(v.get(18)), numeric(v.get(19)), numeric(v.get(20)), numeric(v.get(21)), numeric(v.get(22)),
+                    str(v.get(23)) if v.get(23) is not None else None,
+                    str(v.get(24)) if v.get(24) is not None else None,
+                    excel_date(v.get(25)), str(v.get(26)) if v.get(26) is not None else None,
+                    str(v.get(27)) if v.get(27) is not None else None,
+                    numeric(v.get(28)), str(v.get(29)) if v.get(29) is not None else None,
+                    numeric(v.get(30)), numeric(v.get(31)), numeric(v.get(32)), excel_date(v.get(33)),
+                    str(v.get(34)) if v.get(34) is not None else None,
+                    str(v.get(35)) if v.get(35) is not None else None,
+                    numeric(v.get(36)), excel_date(v.get(37)), str(v.get(38)) if v.get(38) is not None else None,
+                    excel_date(v.get(39)), excel_date(v.get(40)), str(v.get(41)) if v.get(41) is not None else None,
+                    numeric(v.get(42)), numeric(v.get(43)), str(v.get(44)) if v.get(44) is not None else None,
+                    excel_date(v.get(45)), str(v.get(46)) if v.get(46) is not None else None,
+                    str(v.get(47)) if v.get(47) is not None else None,
+                    excel_date(v.get(48)), str(v.get(49)) if v.get(49) is not None else None,
+                    str(v.get(50)) if v.get(50) is not None else None,
+                    excel_date(v.get(51)), str(v.get(52)) if v.get(52) is not None else None,
+                    numeric(v.get(53)), numeric(v.get(54)), str(v.get(55)) if v.get(55) is not None else None,
+                    excel_date(v.get(56)), excel_date(v.get(57)), str(v.get(58)) if v.get(58) is not None else None,
+                    numeric(v.get(59)), Jsonb(raw)
+                ))
+                count += 1
+
+                if len(prod_batch) >= 4000:
+                    with conn.cursor() as cur, cur.copy(copy_sql) as cp:
+                        for item in prod_batch:
+                            cp.write_row(item)
+                    conn.commit()
+                    prod_batch.clear()
+                    update_job(
+                        job_id,
+                        progress=min(88, 22 + count / 700),
+                        rows_processed=count,
+                        message=f'Gestão da Produção: {count:,} linhas processadas'.replace(',', '.')
+                    )
+
+            if prod_batch:
+                with conn.cursor() as cur, cur.copy(copy_sql) as cp:
+                    for item in prod_batch:
+                        cp.write_row(item)
+                conn.commit()
+                prod_batch.clear()
+
         return {sheet: count}
 
 
