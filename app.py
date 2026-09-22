@@ -181,9 +181,20 @@ def company_key_from_production(value):
 def process_margin(path: Path, payload: ProcessRequest, job_id: str):
     with XlsxStream(path) as xlsx:
         required = {'BD', 'BD_Meta'}
-        missing = required - set(xlsx.sheet_names())
+        found_sheets = set(xlsx.sheet_names())
+        missing = required - found_sheets
         if missing:
-            raise RuntimeError('Abas obrigatórias ausentes: ' + ', '.join(sorted(missing)))
+            summary_signature = {'Por família', 'Por vendedor', 'Meta'}
+            if summary_signature.issubset(found_sheets):
+                raise RuntimeError(
+                    'Arquivo de RESUMO detectado, não a base detalhada de Margem. '
+                    'Para o cruzamento com Gestão da Produção, envie o XLSX completo que contém '
+                    'as abas BD e BD_Meta. Abas encontradas: ' + ', '.join(sorted(found_sheets))
+                )
+            raise RuntimeError(
+                'Formato de Margem incompatível. O arquivo completo precisa conter BD e BD_Meta. '
+                'Abas encontradas: ' + ', '.join(sorted(found_sheets))
+            )
 
         bd_headers = xlsx.header_map('BD', 2)
         meta_headers = xlsx.header_map('BD_Meta', 1)
